@@ -1,9 +1,16 @@
+from tabnanny import verbose
 import numpy as np
 import pandas as pd
 import logging
-from typing import List, Tuple, Optional
+from typing import Optional
 import os
 from pathlib import Path
+
+THETA_0 = 0.0
+THETA_1 = 0.0
+LEARNING_RATE = 0.01
+ITERATIONS = 1000
+TOLERANCE = 1e-6  # Convergence tolerance
 
 # Configure logging
 logging.basicConfig(
@@ -16,11 +23,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-THETA_0 = 0.0
-THETA_1 = 0.0
-LEARNING_RATE = 0.01
-ITERATIONS = 1000
-TOLERANCE = 1e-6  # Convergence tolerance
 
 class PredictCarPriceFromMileage:
     """
@@ -41,6 +43,7 @@ class PredictCarPriceFromMileage:
 
         logger.info("Initialized PredictCarPriceFromMileage model")
         logger.info(f"Initial parameters: theta_0={self.theta_0}, theta_1={self.theta_1}")
+
 
     def get_price(self, mileage: float) -> float:
         """
@@ -63,20 +66,26 @@ class PredictCarPriceFromMileage:
         return predicted_price
 
 
-    def train(self, data: List[Tuple[float, float]], iterations: int = ITERATIONS, 
-              learning_rate: float = LEARNING_RATE, verbose: bool = True) -> None:
+    def train(self, data: pd.DataFrame, iterations: int = ITERATIONS, 
+              learning_rate: float = LEARNING_RATE, tolerance: float = TOLERANCE, 
+              verbose: bool = True) -> None:
         """
         Train the model using the provided data.
 
-        :param data: The training data, a list of (mileage, price) tuples.
+        :param data: The training data as a pandas DataFrame with 'km' and 'price' columns.
         :param iterations: The number of training iterations.
         :param learning_rate: The learning rate for gradient descent.
         :param verbose: If True, log training progress every 100 iterations.
         :raises ValueError: If data is empty or contains invalid values.
         """
-        if not data:
-            logger.error("Training data is empty")
+        if data.empty:
+            logger.error("Training DataFrame is empty")
             raise ValueError("Training data cannot be empty")
+        
+        # Validate DataFrame columns
+        if 'km' not in data.columns or 'price' not in data.columns:
+            logger.error("DataFrame must contain 'km' and 'price' columns")
+            raise ValueError("DataFrame must contain 'km' and 'price' columns")
         
         # Validate data
         self._validate_training_data(data)
@@ -99,7 +108,7 @@ class PredictCarPriceFromMileage:
                            f"theta_0 = {self.theta_0:.6f}, theta_1 = {self.theta_1:.6f}")
             
             # Check for convergence
-            if abs(prev_cost - cost) < TOLERANCE:
+            if abs(prev_cost - cost) < tolerance:
                 logger.info(f"Converged at iteration {i+1} with cost {cost:.6f}")
                 break
             
@@ -114,34 +123,43 @@ class PredictCarPriceFromMileage:
         logger.info(f"Training completed. Final cost: {final_cost:.6f}")
         logger.info(f"Final parameters: theta_0={self.theta_0:.6f}, theta_1={self.theta_1:.6f}")
 
-    def _validate_training_data(self, data: List[Tuple[float, float]]) -> None:
+
+    def _validate_training_data(self, data: pd.DataFrame) -> None:
         """Validate that training data contains valid values."""
-        for i, (mileage, price) in enumerate(data):
-            if not isinstance(mileage, (int, float)) or not isinstance(price, (int, float)):
-                raise ValueError(f"Data point {i} contains non-numeric values: {mileage}, {price}")
-            if mileage < 0:
-                raise ValueError(f"Data point {i} has negative mileage: {mileage}")
-            if price <= 0:
-                raise ValueError(f"Data point {i} has non-positive price: {price}")
+        # Check for non-numeric values
+        if not data['km'].dtype.kind in 'biufc' or not data['price'].dtype.kind in 'biufc':
+            raise ValueError("DataFrame must contain numeric values in 'km' and 'price' columns")
+        
+        # Check for missing values
+        if data['km'].isna().any() or data['price'].isna().any():
+            raise ValueError("DataFrame contains missing values")
+        
+        # Check for negative mileage
+        negative_km = data[data['km'] < 0]
+        if not negative_km.empty:
+            raise ValueError(f"DataFrame contains {len(negative_km)} rows with negative mileage")
+        
+        # Check for non-positive prices
+        non_positive_price = data[data['price'] <= 0]
+        if not non_positive_price.empty:
+            raise ValueError(f"DataFrame contains {len(non_positive_price)} rows with non-positive prices")
+        
         logger.debug(f"Training data validation passed for {len(data)} data points")
 
-    def _normalize_data(self, data: List[Tuple[float, float]]) -> Tuple[List[Tuple[float, float]], dict]:
+
+    def _normalize_data(self, data: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         """Normalize mileage data to improve convergence."""
-        mileages = [mileage for mileage, _ in data]
-        prices = [price for _, price in data]
-        
-        mileage_mean = np.mean(mileages)
-        mileage_std = np.std(mileages)
-        price_mean = np.mean(prices)
+        mileage_mean = data['km'].mean()
+        mileage_std = data['km'].std()
+        price_mean = data['price'].mean()
         
         # Avoid division by zero
         if mileage_std == 0:
             mileage_std = 1
             
-        normalized_data = [
-            ((mileage - mileage_mean) / mileage_std, price) 
-            for mileage, price in data
-        ]
+        # Create normalized DataFrame
+        normalized_data = data.copy()
+        normalized_data['km'] = (data['km'] - mileage_mean) / mileage_std
         
         mileage_stats = {
             'mean': mileage_mean,
@@ -151,6 +169,7 @@ class PredictCarPriceFromMileage:
         
         logger.debug(f"Data normalized: mileage_mean={mileage_mean:.2f}, mileage_std={mileage_std:.2f}")
         return normalized_data, mileage_stats
+
 
     def _denormalize_parameters(self, mileage_stats: dict) -> None:
         """Convert normalized parameters back to original scale."""
@@ -165,39 +184,39 @@ class PredictCarPriceFromMileage:
         self.theta_1 = original_theta_1
         logger.debug("Parameters denormalized to original scale")
 
-    def _calculate_cost(self, data: List[Tuple[float, float]]) -> float:
+
+    def _calculate_cost(self, data: pd.DataFrame) -> float:
         """Calculate the mean squared error cost function."""
         m = len(data)
-        total_cost = 0.0
-        
-        for mileage, price in data:
-            prediction = self.theta_0 + self.theta_1 * mileage
-            total_cost += (prediction - price) ** 2
-        
-        return total_cost / (2 * m)
+        predictions = self.theta_0 + self.theta_1 * data['km']
+        squared_errors = (predictions - data['price']) ** 2
+        return squared_errors.sum() / (2 * m)
 
-    def _gradient_descent_step(self, data: List[Tuple[float, float]], learning_rate: float) -> None:
+
+    def _gradient_descent_step(self, data: pd.DataFrame, learning_rate: float) -> None:
         """Perform one step of gradient descent."""
         m = len(data)
-        sum_errors_0 = 0.0
-        sum_errors_1 = 0.0
         
-        # Calculate the gradients for theta_0 and theta_1
-        for mileage, price in data:
-            error = self.theta_0 + self.theta_1 * mileage - price
-            sum_errors_0 += error
-            sum_errors_1 += error * mileage
+        # Calculate predictions and errors
+        predictions = self.theta_0 + self.theta_1 * data['km']
+        errors = predictions - data['price']
         
-        # Update the parameters using the calculated gradients
-        self.theta_0 -= learning_rate * sum_errors_0 / m
-        self.theta_1 -= learning_rate * sum_errors_1 / m
+        # Calculate gradients
+        gradient_0 = errors.sum() / m
+        gradient_1 = (errors * data['km']).sum() / m
+        
+        # Update parameters
+        self.theta_0 -= learning_rate * gradient_0
+        self.theta_1 -= learning_rate * gradient_1
 
-    def load_data_from_csv(self, filepath: str) -> List[Tuple[float, float]]:
+
+    @staticmethod
+    def load_data_from_csv(filepath: str) -> pd.DataFrame:
         """
         Load training data from a CSV file.
         
         :param filepath: Path to the CSV file with 'km' and 'price' columns.
-        :return: List of (mileage, price) tuples.
+        :return: pandas DataFrame with 'km' and 'price' columns.
 
         :raises FileNotFoundError: If the file doesn't exist.
         :raises ValueError: If the file format is invalid.
@@ -216,14 +235,15 @@ class PredictCarPriceFromMileage:
             
             # Remove any rows with missing values
             df = df.dropna()
-            data = [(float(row['km']), float(row['price'])) for _, row in df.iterrows()]
             
-            logger.info(f"Successfully loaded {len(data)} data points from CSV")
-            return data
+            logger.info(f"Successfully loaded {len(df)} data points from CSV")
+            return df
             
         except Exception as e:
             logger.error(f"Error loading CSV file: {e}")
             raise
+
+
 
     def save_model(self, filepath: str) -> None:
         """
@@ -250,6 +270,7 @@ class PredictCarPriceFromMileage:
             logger.error(f"Error saving model: {e}")
             raise
 
+
     def load_model(self, filepath: str) -> None:
         """
         Load a trained model from a file.
@@ -273,6 +294,20 @@ class PredictCarPriceFromMileage:
             logger.error(f"Error loading model: {e}")
             raise
 
+    
+    def drop_model(self) -> None:
+        """
+        Reset the model parameters to their initial state.
+        """
+        self.theta_0 = THETA_0
+        self.theta_1 = THETA_1
+        self.training_history = []
+        self.is_trained = False
+        
+        logger.info("Model parameters reset to initial state")
+        logger.info(f"Current parameters: theta_0={self.theta_0}, theta_1={self.theta_1}")
+
+
     def get_training_stats(self) -> dict:
         """
         Get statistics about the training process.
@@ -293,7 +328,7 @@ class PredictCarPriceFromMileage:
         }
 
 
-def main():
+def test():
     """Main function demonstrating the usage of PredictCarPriceFromMileage."""
     logger.info("Starting linear regression demonstration")
     
@@ -304,25 +339,23 @@ def main():
     try:
         data_path = Path(__file__).parent.parent / "static" / "data.csv"
         if data_path.exists():
-            data = model.load_data_from_csv(str(data_path))
+            data = PredictCarPriceFromMileage.load_data_from_csv(str(data_path))
         else:
-            logger.info("CSV file not found, using example data")
-            data = [
-                (10000, 15000),
-                (20000, 12000),
-                (30000, 10000),
-                (40000, 8000),
-                (50000, 6000)
-            ]
+            logger.info("CSV file not found, creating example DataFrame")
+            # Create DataFrame from example data
+            example_data = {
+                'km': [10000, 20000, 30000, 40000, 50000],
+                'price': [15000, 12000, 10000, 8000, 6000]
+            }
+            data = pd.DataFrame(example_data)
     except Exception as e:
-        logger.warning(f"Failed to load CSV data: {e}. Using example data.")
-        data = [
-            (10000, 15000),
-            (20000, 12000),
-            (30000, 10000),
-            (40000, 8000),
-            (50000, 6000)
-        ]
+        logger.warning(f"Failed to load CSV data: {e}. Using example DataFrame.")
+        # Create DataFrame from example data
+        example_data = {
+            'km': [10000, 20000, 30000, 40000, 50000],
+            'price': [15000, 12000, 10000, 8000, 6000]
+        }
+        data = pd.DataFrame(example_data)
     
     # Train the model
     try:
@@ -363,4 +396,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit_code = main()
+    exit_code = test()
